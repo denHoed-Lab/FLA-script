@@ -3,6 +3,7 @@ READ ME
 
 PeakScanner_peakFilter_v3_5_1
 Version 3_5_1
+
 Authors: Christoph Metzendorf and Eugenia Mazzaferro
 
 Objective
