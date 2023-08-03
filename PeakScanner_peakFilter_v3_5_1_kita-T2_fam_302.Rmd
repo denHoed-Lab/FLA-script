@@ -1,0 +1,777 @@
+---
+title: "PeakScanner_peakFilter_V3_5_1: 20220404_MDH_kita-T2_mpompeg_PLATE01"
+author: 'Kita-T2-fam'
+script version: "v3_5"
+date: "Last compiled on: `r format(Sys.time(), '%Y-%m-%d')`"
+output: html_document
+---
+
+```{r knitrGlobalOptions, include=FALSE}
+# knitr::opts_chunk$set(echo = FALSE, collapse = TRUE)
+# #saving the file, to make sure, that the knit function is carried out with the correct file
+# rstudioapi::documentSave(rstudioapi::getActiveDocumentContext()$id)
+
+```
+
+
+## PARAMETERS
+### File locations, names and wt fragment size and channel to be used
+
+#### Setting the channel to be analyzed
+!OBS! this  handles single channel runs only (STD (ROX) + 1 sample dye)
+
+__blue / FAM__ channel = "B"  
+__green / HEX__ channel = "G"  
+__yellow / atto__ channel = "Y"  
+*__red channel (ROX - STANDARD)__*
+```{r parameters, echo=TRUE}
+#IF this is "TRUE" then an HTML report will be created automatically; if it´s "FALSE" no report will be created automatically; using "Knit" button in RStudio will do the same.
+KNITreport <- TRUE
+
+#set the input/output directories
+dir_input <- "./input/"
+dir_output <- "./output/"
+
+#channel of the sample dye ("B" blue, "G" green, "Y" yellow)
+channel <- "B"
+
+#set the file name
+fileName <- "20220404_MDH_kita-T1vsT2_mpompeg_PLATE01.txt"
+
+#set the size of the WT
+WTsize <- 303
+
+```
+
+### More parameters
+These __parameters should not be changed__ in STD conditions.  __IF changed,  changes should be documented__.
+```{r parameters_2, echo=TRUE}
+#the margin of how wide the size range should be around the "wt size" (should not be 0.5 as that will be halfway to the next fragement size and is more likely to include false positives.
+WTsizeMargin <- 0.4
+
+#if there are any peaks that need to be ignored as they are clearly artifacts and far enough away from WT peaks (>=2 bp) their size can be added to the list here ( e.g. c(150) igonres any peak with size of 150 bp; c(150, 120) - peaks with 150 or 120 bp are ignored)
+IgnorePeakSize <- c(302) # set to -1000 if nothing should be ignored, as there will not be any peaks with size -1000.
+
+#SET PARAMETERS FOR FILTERING
+#smallSizeCutOff is used to remove PCR products that are too small to be true products (e.g. primer dimers etc); even though the data will also be filtered by WTsize ¨+/- size_span, this parameter makes sure, a large size span does not accidentially include the too small products.
+smallSizeCutOff <- 100
+
+#smallPeakHeightCutOFF is used to set a minium hight of genuine peaks
+smallPeakHeightCutOff <- 150
+#manuaPeakHeightCutOFF; when true the manually set value is used, when false a dataset with runs of standard only (no sammple) has to be provided; this will be used to determine the threshold based on experimental data
+manualPeakHeightCutOFF <- FALSE
+#adjust % in line 190ish to same as set here
+smallPeakHeightCutOff_quantile <- 0.99 
+
+#set the span around the size of the WT, everything outside that range will be removed
+size_span <- 50
+
+```
+
+## LIBRARIES
+```{r}
+#loading libraries
+#if (!require("plyr")){ 
+#    install.packages("plyr")
+#    require("plyr")}
+if (!require("stringr")){ 
+    install.packages("stringr")
+    require("stringr")}
+if (!require("tidyverse")){ 
+    install.packages("tidyverse")
+    require("tidyverse")}
+if (!require("viridis")){ 
+    install.packages("viridis")
+    require("viridis")}
+if (!require("plotly")){ 
+    install.packages("plotly")
+    require("plotly")}
+```
+
+
+## Reading of data files  
+* results exported form peak scanner  
+* plate layout of sample names  
+* plate layout of sample types  
+```{r, echo=FALSE}
+peakScanner_DF <- read.table(paste0(dir_input, fileName), header=TRUE, sep="\t", quote = "")
+
+#File Name of the Sample Types Layout file
+#derived from the sampleFileName
+fileNamesampleNames <- paste0(str_replace(fileName,".txt",""), "_PLATE_LAYOUT.txt")
+
+
+if(length(peakScanner_DF$Size)>0){print(paste("READ peak scanner data file:", paste0(dir_input, fileName)))}else{print(paste("!OBS! FAILED TO READ peak scanner data file:", paste0(dir_input, fileName)))}
+
+#extract well coordinates string if the sample name is well position_<something_more>
+peakScanner_DF$Sample.Name <- str_sub(peakScanner_DF$Sample.Name,1 ,3)
+
+#reading a sample types layout if present
+if( file.exists(paste0(dir_input ,fileNamesampleNames))){
+
+    plateLayout_sampleNames <- read.table(paste0(dir_input ,fileNamesampleNames), header=TRUE, sep="\t", quote = "")
+    #slicing the DF to size in case there are some zombi rows or columns - can happen when using excel
+    if(NROW(plateLayout_sampleNames)>8)
+    {
+      print("!OBS! ------------------")
+      print(paste("_PLATE_LAYOUT.txt had too many rows - they were sliced down to 8. Number of rows found:",NROW(plateLayout_sampleNames) ))
+      print("------------------")
+    plateLayout_sampleNames <- plateLayout_sampleNames  %>% slice(1:8)
+    }
+
+    if(NCOL(plateLayout_sampleNames)>13)
+    {
+    print("!OBS! ------------------")
+    print(paste("_PLATE_LAYOUT.txt had too many columns - they were sliced down to 13. Number of columns found:",NCOL(plateLayout_sampleNames) ))
+    print("------------------")
+    plateLayout_sampleNames <- plateLayout_sampleNames[c(1:13) ]
+    }
+    
+    if(NROW(plateLayout_sampleNames)<8){stop("_PLATE_LAYOUT.txt file corrupted - not enough rows")}
+    if(NCOL(plateLayout_sampleNames)<13){stop("_PLATE_LAYOUT.txt file corrupted - not enough columns")}
+
+  
+    colnames(plateLayout_sampleNames) <- c("rowNames","01","02","03","04","05","06","07","08","09","10","11","12")
+    plateLayout_sampleNames <- plateLayout_sampleNames %>% gather(column,sampleNames, -rowNames)
+
+    plateLayout_sampleNames$well <- paste0(plateLayout_sampleNames$rowNames,plateLayout_sampleNames$column)
+    plateLayout_sampleNames$sampleTypes <- "unknown"
+    plateLayout_sampleNames$sampleTypes[plateLayout_sampleNames$sampleNames == "wt"] <- "wt"
+    plateLayout_sampleNames$sampleTypes[plateLayout_sampleNames$sampleNames == "blank"] <- "blank"
+    plateLayout_sampleNames$sampleTypes[plateLayout_sampleNames$sampleNames == "skip"] <- "skip"
+    
+    #merge the plate layout with the peakScanner data set to annotate the data with sampleNames and sample types
+    peakScanner_DF <- merge(plateLayout_sampleNames, peakScanner_DF, by.x = "well", by.y = "Sample.Name")
+
+    rm(plateLayout_sampleNames)
+    print(paste("READ sample types layout file:", dir_input, fileNamesampleNames))
+     
+}else{print(paste("!OBS! FILE NOT FOUND:", dir_input, fileNamesampleNames))}
+
+
+```
+
+
+## Determination of *noise* peaks
+* Noise are peaks that appear in "blank" sample runs (runs with the size standard but no sample). Every sample peak that is not higher than the *noise* peak(s) is most likely noise and needs to be disregarded in further analysis.
+
+* On standard plate layouts 8 wells without samples are present and the script will use the data from those wells to determine *noise*.  
+* If a plate does not contain "blank" wells the initial parameter (smallPeakHeightCutOff ) will be used
+
+```{r, echo=FALSE}
+ peakScanner_BackGroundOnly <-subset(peakScanner_DF, peakScanner_DF$sampleNames=="blank")
+   if(manualPeakHeightCutOFF){
+   print(paste("!OBS! Minimal PeakHightCutoff was not selected (manualPeakHeightCutOFF = TRUE); the set parameter (smallPeakHeightCutOff) used is:", smallPeakHeightCutOff))
+   }else if(length(peakScanner_BackGroundOnly$well)==0){
+     #IF there is no blank data in the run or there is no noise in the blank data, the PeakHieghtCutoff parameter set in the parametersection is used.
+   print(paste("!OBS! Background could not be determined dynamically (no blanks in dataset or no peaks in blanks); smallPeakHeightCutOff used is:", smallPeakHeightCutOff))
+   } else {
+     peakScanner_BackGroundOnly$blank <- "SampleSet"
+     peakScanner_BackGroundOnly$blank[peakScanner_BackGroundOnly$sampleNames =="blank"]<-"BackGroundSet"
+
+
+#removing all data that is not from blanks in the correct channel and of which fragment sizes are below the smallSizeCutOff
+peakScanner_BackGroundOnly <- subset(peakScanner_BackGroundOnly, !is.na(Size) &
+                                  str_detect(peakScanner_BackGroundOnly$Dye.Sample.Peak, channel) &
+                                  str_detect(peakScanner_BackGroundOnly$sampleNames,"blank") & 
+                                  peakScanner_BackGroundOnly$Size > smallSizeCutOff
+                                     )
+ #aftere this filtering, there might not be any peaks left that are > smallSizeCutOff, then the peakHeight set manually must be taken
+if(length(peakScanner_BackGroundOnly$Size)<3) {
+  print(paste("Fewer than 3 blank peaks have fragment length >",smallSizeCutOff,". Therefore, the user defined smallPeakHeightCutOff was used:",smallPeakHeightCutOff))
+ 
+  } else {
+    print(paste("Peak heights (size > smallSizeCutOff (",smallSizeCutOff,"), blank = TRUE, channel =", channel))
+    print(sort(peakScanner_BackGroundOnly$Height[peakScanner_BackGroundOnly$blank == "BackGroundSet"]))
+    print("Peak heights of the peaks within the Sample Set (should be integer(0) -> no data):")
+    print(peakScanner_BackGroundOnly$Height[peakScanner_BackGroundOnly$blank == "SampleSet"])
+
+## Subset "blank" with size > samllSizeCutOff and hight > smallPeakHeightCutOff
+peakScanner_BackGroundOnly_subset <- peakScanner_BackGroundOnly[ which( peakScanner_BackGroundOnly$Size > smallSizeCutOff & peakScanner_BackGroundOnly$Height > smallPeakHeightCutOff),]
+
+smallPeakHeightCutOffold <- smallPeakHeightCutOff
+
+#determining the quartile with the set limit (see parameter section)
+smallPeakHeightCutOff <-as.integer(quantile(peakScanner_BackGroundOnly_subset$Height,smallPeakHeightCutOff_quantile)["99%"])
+
+
+if(is.na(smallPeakHeightCutOff)){
+  smallPeakHeightCutOff<-smallPeakHeightCutOffold
+  print("")
+  print("!OBS! - !OBS! - !OBS!- !OBS! - !OBS!")
+  print("")
+  print("smallPeakHeightCutOff could not be determined automatically, MANUAL/DEFAULT cutoff is used instead")
+  print("")
+  print(paste("cutoff =",smallPeakHeightCutOff))
+  print("")
+  print("!OBS! - !OBS! - !OBS!- !OBS! - !OBS!")
+
+
+ #   p <- peakScanner_BackGroundOnly %>%
+ #     ggplot( aes(x=Height, fill=as.factor(blank))) +
+ #     geom_density(alpha=0.5) +
+ #     labs(fill="") +
+ #     geom_vline(aes(xintercept = smallPeakHeightCutOff), col = "blue", size = 0.5) +
+ #     geom_text(aes(label=paste0("manual cutoff: ",smallPeakHeightCutOff), y=0.01, x=smallPeakHeightCutOff,angle=90, vjust=-1)) +
+ #    ggtitle("density plot of peak heights in -blank- samples")
+ # 
+ # print(p)
+
+p <- peakScanner_BackGroundOnly %>%
+ ggplot( aes(x=Height, fill=as.factor(blank))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity', bins = 10) +
+    labs(fill="") +
+    geom_vline(aes(xintercept = smallPeakHeightCutOff), col = "blue", size = 0.5) +
+    geom_text(aes(label=paste0("manual cutoff: ",smallPeakHeightCutOff), y=4, x=smallPeakHeightCutOff,angle=90, vjust=-1))+
+    ggtitle("frequency of peak heights in -blank- samples")   
+
+print(p) 
+                                 
+
+}else {
+   print(paste("The cutoff for <Height> is set to the ",smallPeakHeightCutOff_quantile *100,"% quantile:", smallPeakHeightCutOff))
+
+ # p<- peakScanner_BackGroundOnly %>%
+ #  ggplot( aes(x=Height, fill=as.factor(blank))) +
+ #    geom_density(alpha=0.5) +
+ #    labs(fill="") +
+ #    geom_vline(aes(xintercept = smallPeakHeightCutOff), col = "blue", size = 0.5) +
+ #    geom_text(aes(label=paste0(smallPeakHeightCutOff_quantile *100,"% quantile: ",smallPeakHeightCutOff), y=0.01, x=smallPeakHeightCutOff,angle=90, vjust=-1)) +
+ #   ggtitle("density plot of peak heights in -blank- samples")
+# print(p)
+
+p <- peakScanner_BackGroundOnly %>%
+ ggplot( aes(x=Height, fill=as.factor(blank))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity', bins = 10) +
+    labs(fill="") +
+    geom_vline(aes(xintercept = smallPeakHeightCutOff), col = "blue", size = 0.5) +
+    geom_text(aes(label=paste0(smallPeakHeightCutOff_quantile *100,"% quantile: ",smallPeakHeightCutOff), y=4, x=smallPeakHeightCutOff,angle=90, vjust=-1))+
+    ggtitle("frequency of peak heights in -blank- samples") 
+print(p)
+
+
+
+p <- subset(peakScanner_DF, Size > smallSizeCutOff & Height > smallPeakHeightCutOffold & str_detect(peakScanner_DF$Dye.Sample.Peak, channel)) %>%
+ ggplot( aes(x=Height, fill=as.factor(sampleTypes))) +
+    geom_histogram(alpha=0.6, position = 'stack') +
+    labs(fill="") +
+    geom_vline(aes(xintercept = smallPeakHeightCutOff), col = "blue", size = 0.5) +
+    geom_text(aes(label=paste0(smallPeakHeightCutOff_quantile *100,"% quantile: ",smallPeakHeightCutOff), y=4, x=smallPeakHeightCutOff,angle=90, vjust=-1))+
+    ggtitle("frequency of peak heights in all samples") 
+print(p)
+rm(p)
+rm(smallPeakHeightCutOffold)
+  }
+
+}
+rm(peakScanner_BackGroundOnly_subset)
+   }
+#cleanup
+rm(peakScanner_BackGroundOnly)
+
+```
+
+
+## Filtering and processing of data
+Removing peaks with 
+
+* size = NA  
+* Quality != "Pass" (Quality is a parameter from peak finder)  
+  
+  
+Flagging peaks as "passed filter = TRUE" if
+
+* channel = selected channel  
+* size (fragment length) > cutoff for too small  
+* size > wt size + size_span  
+* size < wt size - size_span  
+* peak height > background threshold  
+* peak size is not in the "IgnorePeakSize" list
+* not in a well marked as "skip"
+
+```{r, echo=FALSE}
+#peakScanner_DF_backup <- peakScanner_DF
+#peakScanner_DF <- peakScanner_DF_backup
+
+
+#removing data that has no size value or did not pass the quality threshold of peak-scanner
+peakScanner_DF <- subset(peakScanner_DF, !is.na(Size))
+print("WELLS with too LOW QUALITY (according to PeakScanner) - and removed from analysis:")
+levels(as.factor(peakScanner_DF$well[peakScanner_DF$Quality !="Pass"]))
+peakScanner_DF <- subset(peakScanner_DF, (Quality=="Pass"))
+
+#rounding fragment "Size" to full numbers
+peakScanner_DF$Size.Rounded <- round(peakScanner_DF$Size,0)
+
+#labelling data if it passes the "filter" (passedFilter column = TRUE if: channel matches selection, size > smallSizeCutOff, size is WTsize +/- size_span, and peak height > smallPeakHeightCutOff
+peakScanner_DF$passedFilter <- FALSE
+peakScanner_DF$ignoredPeak <- FALSE
+peakScanner_DF$passedFilter <-str_detect(peakScanner_DF$Dye.Sample.Peak, channel) & # channel
+                              peakScanner_DF$Size.Rounded > smallSizeCutOff & # above min size
+                              peakScanner_DF$Size.Rounded < (WTsize + size_span) & # within..
+                              peakScanner_DF$Size.Rounded > (WTsize - size_span) & #...size range
+                              peakScanner_DF$Height > smallPeakHeightCutOff & # above min peak height
+                              !peakScanner_DF$Size.Rounded %in% IgnorePeakSize & # exclude peaks in the IgnorePeakSize list
+                              peakScanner_DF$sampleNames != "skip"
+print("---------------")  
+peakScanner_DF$ignoredPeak <- peakScanner_DF$Size.Rounded %in% IgnorePeakSize
+print(paste("Peak sizes to ignore :"))
+print(IgnorePeakSize)
+print(paste("Peaks with this size:",sum(peakScanner_DF$ignoredPeak)))
+print("Wells")
+wellList<-peakScanner_DF$well[peakScanner_DF$ignoredPeak]
+print(wellList[!duplicated(wellList)])
+rm(wellList)
+print("---------------")  
+
+helper_DF <- peakScanner_DF %>% 
+  group_by( Sample.File.Name) %>% 
+  summarize(numberOfPeaks = length(Sample.File.Name), SamplePassedFilter = sum(passedFilter))
+
+print("Samples that had no peaks that passed the filter:")
+helper_DF$Sample.File.Name[helper_DF$SamplePassedFilter==0]
+
+#histograms of the datasets
+ggplot (peakScanner_DF, aes(x=Size.Rounded, fill=passedFilter)) +
+  geom_histogram() +
+  theme_classic()
+
+##ggplot (peakScanner_DF, aes(x=Height, fill=passedFilter)) +
+##  geom_histogram() +
+##  theme_classic()
+
+##ggplot (subset(peakScanner_DF,peakScanner_DF$passedFilter), aes(x=Height, fill=passedFilter)) +
+##  geom_histogram() +
+##  theme_classic()
+
+ggplot(subset(peakScanner_DF,peakScanner_DF$Size.Rounded>smallSizeCutOff & 
+                             peakScanner_DF$Height > smallPeakHeightCutOff &
+                             str_detect(peakScanner_DF$Dye.Sample.Peak,channel)), aes(x=Size.Rounded, y=Height)) + 
+                             geom_point(aes(color = factor(sampleTypes)), alpha = 0.5) +
+                             theme(legend.position = "right") 
+
+
+##ggplot (subset(peakScanner_DF,peakScanner_DF$passedFilter), aes(x=Area.in.BP, fill=passedFilter)) +
+##  geom_histogram() +
+##  theme_classic()
+
+rm(helper_DF)
+
+# peakScanner_DF$Size.Rounded[peakScanner_DF$Sample.Name=="A01" & peakScanner_DF$passedFilter]
+```
+
+
+## Comparing peak areas with peak heights
+These peaks passed the filter and will be used for analysis. The plots should be mostly linear. If "Area.in.Point/BP" increases while "Height" doesn´t the dataset contains peaks that are too high. 
+
+```{r, echo=FALSE}
+#ggplot(subset(peakScanner_DF,peakScanner_DF$passedFilter), aes(x=Area.in.BP, y=Area.in.Point)) + 
+  # geom_point(aes(color = factor(well)))+
+  #  theme(legend.position = "none") 
+
+ggplot(subset(peakScanner_DF,peakScanner_DF$passedFilter), aes(x=Height, y=Area.in.Point)) + 
+  geom_point(aes(color = factor(well)))+
+   theme(legend.position = "none") 
+
+ggplot(subset(peakScanner_DF,peakScanner_DF$passedFilter), aes(x=Height, y=Area.in.BP)) + 
+  geom_point(aes(color = factor(well)))+
+   theme(legend.position = "none") 
+
+```
+
+
+
+
+## Determining relative peak areas and total peak area per sample
+Per sample calculating on filtered data:  
+* Area.in.BP.RelToMax: peak areas relative to largest peak (area/max(area)); max = 1  
+* Area.in.BP.RelToSum: peak areas relative to total peak area (area / sum(area)); sum = 1  
+* Area.in.BP.Sum: total peak area  
+
+```{r, calc_relative_and_sum_peak_areas, echo=FALSE}
+#subsetting the data to remove all the entries that did not pass the filter and should not contribute to the calculation of the relative  peak area;
+
+#calculate the  peak area relative to the largest peak of a sample
+peakScanner_DF_F <- group_by(subset(peakScanner_DF, passedFilter), well) %>%
+  mutate(Area.in.BP.RelToMax = Area.in.BP/max(Area.in.BP))
+
+#calculating peak area relative to total peak area of a sample
+peakScanner_DF_F <- group_by(peakScanner_DF_F, well) %>% 
+  mutate(Area.in.BP.RelToSum = Area.in.BP/sum(Area.in.BP))
+
+#calculating sum of peak areas per sample
+peakScanner_DF_F <- group_by(peakScanner_DF_F, well) %>% 
+  mutate(Area.in.BP.Sum = sum(Area.in.BP))
+
+```
+
+## Estimation of the size-range of WT peaks
+As fragment sizes are determined by calibration via a size standard, sizes are numbers with decimals.  
+Therefore, sizes must be rounded to full numbers to be able to calculate InDelSizes. However, in cases where wt fragements can be rounded up or down in different samples (e.g. 211.4 and 211.5) this can cause a serious problem of wt-peak detection.  
+
+Here the size range of wt peaks of wt-samples is determined:
+
+* the highest peak must have a rounded fragment size of wt-size +/- 1 bp
+  + make sure to  check that wt-samples look good if there are problems here
+* get the min and max fragment sizes
+* expand the size range by 25%
+* if more than one peak is within the wt-peak range, the peak closest to the median of wt peak sizes will be assigned as wt peak in that well and marked TRUE in 
+```{r, WT_size_range_estimation, echo=FALSE}
+#for each of the samples, the highest peak in the WT sample is labelled as the WT peak. Make sure, they all are WT peaks.
+helperDF <- group_by(peakScanner_DF_F, well) %>%
+  mutate(WTpeak =((Height==max(Height)) & 
+                  (sampleTypes =="wt") & 
+                  (Size.Rounded <= WTsize + 1) &
+                  (Size.Rounded >= WTsize - 1))) #+/- 1 is necessary as fragemnt sizes are not centered around the full number, but can also be shifted to the .5 decimal, which will result in different sizes after rounding: 211.5 would round to 212 while 211.3 would round to 211;
+
+
+print(paste("WT peaks in WT samples found:",sum(helperDF$WTpeak),"list of fragment sizes"))
+helperDF$Size[helperDF$WTpeak]
+
+print("WT samples with largest peak of rounded length = WT fragment length")
+print(helperDF$well[helperDF$WTpeak &
+                             helperDF$Size.Rounded ==WTsize])
+print("WT samples with largest peak of rounded length = WT fragment length - 1")
+print(helperDF$well[helperDF$WTpeak & helperDF$Size.Rounded ==(WTsize-1)])
+
+print("WT samples with largest peak of rounded length = WT fragment length + 1")
+print(helperDF$well[helperDF$WTpeak & helperDF$Size.Rounded ==(WTsize+1)])
+
+
+#to correct for a shift in the sizes from the full number (e.g. around .5 instead .0) all sizes will be shifted so that the median of WT peaks becomes the theoretical wt size assigned by the user in the parameter WTsize
+
+WTsize_median = median(c(helperDF$Size[helperDF$WTpeak]))
+Size_correction_factor <- WTsize-WTsize_median
+
+print(paste("median of WT sizes:",WTsize_median," and the resulting size correction factor:", Size_correction_factor))
+
+#using the WTsize_median to correct all sizes by shifting sizes so that the median = wt size.
+#the original sizes are kept, a new variable, Size.Fixed is introduced
+helperDF$Size.Fixed <- helperDF$Size + Size_correction_factor
+helperDF$Size.Rounded <- round(helperDF$Size.Fixed, 0)
+
+WTsize_median = median(c(helperDF$Size.Fixed[helperDF$WTpeak]))
+print(paste("After size correction, the median of the wt peak sizes is:",WTsize_median))
+
+
+
+#determining the range minimum and maximum sizes of WT fragments and adding a margin modified by the factor WTsizeMArgin to it
+WTsizeMin <- min(helperDF$Size.Fixed[helperDF$WTpeak])
+WTsizeMax <- max(helperDF$Size.Fixed[helperDF$WTpeak])
+
+print(paste("The WT samples have fragment sizes between ", WTsizeMin,"bp and ", WTsizeMax,"bp. The WTsizeMargin is:+/-", WTsizeMargin))
+
+WTsizeMin <- WTsize - WTsizeMargin
+WTsizeMax <- WTsize + WTsizeMargin
+
+print(paste("Unknown fragments with sizes between", WTsizeMin," and ", WTsizeMax,"will be considered as WT fragments."))
+
+#OBS
+#OBS
+#FROM HERE ON, WTpeak is TRUE for all peaks within the WT size range
+helperDF$WTpeak[(helperDF$Size.Fixed >= (WTsizeMin)) &
+                (helperDF$Size.Fixed <= (WTsizeMax))] <- TRUE
+
+
+WTsize_experiment <- round(median(c(helperDF$Size.Fixed[helperDF$WTpeak & (helperDF$sampleTypes =="wt")])))
+if(is.na(WTsize_experiment)){print("!OBS!---------- NO WT PEAKS FOUND ------------")
+  stop("!OBS!---------- NO WT PEAKS FOUND ------------")}
+if(WTsize != WTsize_experiment){print("!OBS! !OBS! !OBS! !OBS!")
+                                                  print("")
+                                                  print("theoretical WTsize did not match rounded mean of experimental WT fragement size ")
+                                                  print(paste("WTsize: ", WTsize))
+                                                  print("")
+                                                  print(paste("new WTsize", WTsize_experiment))
+                                                  print("")
+                                                  print("!OBS! !OBS! !OBS! !OBS!")
+                                                  
+                                                  #assigning the experimental WT fragement size to WTsize
+                                                  WTsize <- WTsize_experiment
+                                                  }
+rm(WTsize_experiment, Size_correction_factor)
+
+
+
+#checking that there are not accidentially two WT peaks in one sample
+MoreThan1WtPeaks = duplicated(helperDF$well[helperDF$WTpeak])
+print(paste("Number of samples that after WT assignemnts have two peaks considered beeing WT peaks:", sum(MoreThan1WtPeaks)))
+
+if(sum(MoreThan1WtPeaks) > 0)
+{print("OBS OBS OBS OBS OBS OBS OBS OBS OBS OBS OBS")
+ print("")
+ print("There are samples with more than one WT peak!!! This needs to be fixed by changing the WT_margin_Factor to smaller values or removing wt samples that deviate too much in the fragment size of their WT peak.")}
+
+
+
+ggplot (subset(helperDF,helperDF$WTpeak & (sampleTypes == "wt")), aes(x=Size.Fixed, fill=sampleTypes)) +
+  geom_histogram(color="darkblue") +
+  ggtitle("wt fragment size distribution: highest peaks in wt samples only (WTpeak==TRUE") +
+  theme_classic()
+
+
+ggplot (subset(helperDF, helperDF$sampleTypes =="wt"), aes(x=Size.Fixed, y=Area.in.BP, color = factor(WTpeak))) +
+  geom_point() +
+  ggtitle("wt fragment size distribution: sampleType = wt") +
+  theme_classic()+
+  geom_vline(xintercept = WTsizeMax , linetype="dashed", 
+                color = "blue", size=1)+
+  geom_vline(xintercept = WTsizeMin , linetype="dashed", 
+                color = "blue", size=1)
+
+
+ggplot (subset(helperDF, Size.Fixed >= WTsize - 2 & Size.Fixed <= WTsize + 2), aes(x=Size.Fixed, y=Area.in.BP, color = WTpeak)) +
+  geom_point() +
+  ggtitle("fragment size distribution: all samples") +
+  theme_classic()+
+  geom_vline(xintercept = WTsizeMax , linetype="dashed", 
+                color = "blue", size=1)+
+  geom_vline(xintercept = WTsizeMin , linetype="dashed", 
+                color = "blue", size=1)+ 
+      scale_x_continuous(n.breaks = 10)+
+  theme(axis.text.x = element_text(angle=90))
+
+peakScanner_DF_F <- helperDF
+rm(helperDF)
+```
+
+
+## Calculating the sizes of the InDels
+```{r, Calc_InDels, echo=FALSE}
+#calculate the sizes of the InDels
+peakScanner_DF_F$Size.InDels <- peakScanner_DF_F$Size.Rounded - WTsize
+
+#plotting the resulting data
+ggplot(peakScanner_DF_F, aes(x=Size.InDels, y=Area.in.BP.RelToMax)) + 
+  geom_point(aes(color = factor(well)))
+
+#annotating InDel sizes whether they are multiples of 3, not multiples of 3, or WT
+peakScanner_DF_F$Multi3 <- "NA"
+peakScanner_DF_F$Multi3[peakScanner_DF_F$Size.InDels %% 3 == 0] <- "in-frame"
+peakScanner_DF_F$Multi3[peakScanner_DF_F$Size.InDels %% 3 != 0] <- "frameshift"
+peakScanner_DF_F$Multi3[peakScanner_DF_F$Size.InDels == 0] <- "WT"
+
+```
+
+
+## Summarising data & plotting
+
+```{r, Summarizing_PLOTTING, echo=FALSE}
+#making a new data-frame with summaries
+peakScanner_DF_S <- peakScanner_DF_F %>% 
+                    group_by(well) %>%
+                    summarise(wt_peak = sum(WTpeak)==1, 
+                              wt_rel_Area = if(sum(WTpeak)==1){
+                                Area.in.BP.RelToSum[WTpeak]
+                                }else if (sum(WTpeak)!=1){0},
+                              nonFrameShift = sum(Area.in.BP.RelToSum[Multi3=="in-frame"]),
+                              FrameShift = sum(Area.in.BP.RelToSum[Multi3=="frameshift"]),
+                              #Area_total is the sum of all peak areas; here mean is used as Area.in.BP.Sum already is the total area per sample and has the same value for all peaks per sample
+                              Area_total = mean(Area.in.BP.Sum),
+                              #N_peaks gives the number of peaks per sample
+                              N_peaks = length(Size.InDels),
+                              #InDelSizes is a ";" separated list of the sizes of InDels
+                              InDelSizes = paste(as.character(Size.InDels), collapse="; ")
+                              )
+
+
+
+
+
+#annotating the data by "treatment group" as indicated in column "sampleNames"
+#OBS - the following merger will result in the addition of samples that were removed for the one or other reason; those samples have NA in anything but "sample.file.name" and "UD1"
+peakScanner_DF_S <- merge(x = peakScanner_DF_S, y = subset(peakScanner_DF[, c("well","sampleNames","sampleTypes", "column","rowNames" )],!duplicated(peakScanner_DF$well)), by = "well", all.y=TRUE)
+
+print("Samples that were removed from analysis by filtering")
+peakScanner_DF_S$well[is.na(peakScanner_DF_S$wt_peak)]
+removed_wells <- peakScanner_DF_S$well[is.na(peakScanner_DF_S$wt_peak)]
+#peakScanner_DF_S<-subset(peakScanner_DF_S, !is.na(wt_rel_Area))
+
+
+#checking that the sum of all relative areas add up to 1
+if(sum(apply(peakScanner_DF_S[, c("wt_rel_Area", "nonFrameShift", "FrameShift")], 1,sum), na.rm = TRUE)!=(96 - length(removed_wells))){print("!OBS! - the relative peak areas are not adding up to 1 in at least one sample")
+ apply(peakScanner_DF_S[, c("wt_rel_Area", "nonFrameShift", "FrameShift")], 1,sum)
+   }else {print("All relative peak areas added up to 1 for each sample")}
+
+#plotting "total peak area" - the sum of peak areas per well, as a proximate of "signal strength". IF very low, data might not be very trustworthy
+totalAreaMax <- max(peakScanner_DF_S$Area_total[!is.na(peakScanner_DF_S$Area_total)])
+peakScanner_DF_S$Area_total_relativ <- peakScanner_DF_S$Area_total/totalAreaMax
+rm(totalAreaMax)
+
+subset(peakScanner_DF_S, !is.na(wt_rel_Area)) %>% ggplot (aes(x=Area_total_relativ, fill=sampleTypes)) +
+  geom_histogram(bins=50) +
+  theme_classic()+
+  ggtitle("Signal strength (total peak area per well) across samples")
+
+peakScanner_DF_S %>% subset(!is.na(Area_total)) %>%
+  ggplot (aes(x=wt_rel_Area, y=N_peaks, color = factor(sampleTypes), size=Area_total_relativ)) +
+  geom_point(alpha=0.5) +
+  ggtitle("PER WELL: Number of peaks vs wt_peak_area (bubble size = relative total peak area") +
+  #geom_count()+
+  scale_size_area()+
+  theme_classic()+
+  theme(legend.position = "right")+
+  ylim(0,NA)+
+  xlim(0,NA)+
+  facet_wrap(~factor(sampleTypes))
+
+
+#plotting the data in a plate-format style    
+#signal strenght per well
+peakScanner_DF_S %>% ggplot(aes(column, forcats::fct_rev(rowNames), fill=Area_total)) + 
+  geom_tile() + 
+  scale_fill_continuous(type ="viridis")+ 
+  geom_text(aes(label = sampleNames))+
+  labs(x ="", y = "", fill ="area") +
+  ggtitle("Total peak area (signal) per well")
+
+#relative wt peak area = an indicator if this is a wt sample
+peakScanner_DF_S %>% ggplot(aes(column, forcats::fct_rev(rowNames), fill=wt_rel_Area)) + 
+  geom_tile() + 
+  scale_fill_continuous(type ="viridis")+ 
+  geom_text(aes(label = sampleNames))+
+  labs(x ="", y = "", fill ="area") +
+  ggtitle("Relative wt-peak area per well")
+
+#relative peak area of putative frame shift mutations
+peakScanner_DF_S %>% ggplot(aes(column, forcats::fct_rev(rowNames), fill=FrameShift)) +
+  geom_tile() +
+  scale_fill_continuous(type ="viridis")+
+  geom_text(aes(label = sampleNames))+
+  labs(x ="", y = "", fill ="area") +
+  ggtitle("Relative frameshift-peak area per well")
+
+#showing the number of fragments per well - more fragments are often associated with less likly wt
+if(length(levels(as.factor(peakScanner_DF_S$N_peaks[!is.na(peakScanner_DF_S$N_peaks)])))>1){
+peakScanner_DF_S %>% ggplot(aes(column, forcats::fct_rev(rowNames), fill=N_peaks)) +
+  geom_tile() +
+  scale_fill_stepsn(colours = viridis(10))+
+  geom_text(aes(label = sampleNames))+
+  labs(x ="", y = "", fill ="fragments") +
+  ggtitle("Number of fragments (peaks) per sample ")
+}else{warning("!OBS! - very few peaks detected.")} 
+
+#plotting a histogram of the relative_peak_area to get an overview of how many samples are WT
+subset(peakScanner_DF_S, !is.na(wt_rel_Area)) %>%
+   ggplot( aes(x=wt_rel_Area, fill=as.factor(sampleTypes))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'stack') +
+    labs(fill="")
+
+
+
+#writing the result summary table
+write.table(peakScanner_DF_S, paste0(dir_output, str_replace(fileName,".txt",""),"_RESULTS_T2_fam.txt"), row.names=FALSE, quote = FALSE, append = FALSE, sep = "\t")
+print("--------------")
+print(paste("Saved output as file ", paste0(str_replace(fileName,".txt",""),"_RESULTS_T2_fam.txt")))
+print(paste("@",paste0(getwd(),str_replace(dir_output,"./","/"))))
+
+write.table(peakScanner_DF_F, paste0(dir_output, str_replace(fileName,".txt",""),"_peakScanner_DF_F_DATA-FRAME_T2_fam.txt"), row.names=FALSE, quote = FALSE, append = FALSE, sep = "\t")
+
+```
+
+
+#Rough quantification of "bad" wt sampels and putative negative controls
+* cutoff for a wild type peak to be considered beeing solid (the allele beeing wt): 0.8
+```{r, Mini_consistency_check, echo=FALSE}
+#WT samples with too small peak.area of WT peak
+print("wt samples with too small relative peak area (< 0.8) for wt peak:")
+peakScanner_DF_S$well[peakScanner_DF_S$sampleNames =="wt" &
+                              peakScanner_DF_S$wt_rel_Area < 0.8]
+print("potential negative controls (injected samples with peak area of wt fragment size and relative wt peak area > 0.8)")
+peakScanner_DF_S$well[peakScanner_DF_S$sampleNames !="wt" &
+                              peakScanner_DF_S$wt_rel_Area > 0.8]
+```
+
+
+### Plotting InDel-centric data in more detail
+```{r, PLOTTING_InDel, echo=FALSE}
+#plot the fractions of the area as stacked bar plots by sample/well
+#just plotting it
+    ggplot(peakScanner_DF_F, aes(fill=Size.InDels, 
+                                  y=Area.in.BP.RelToSum,
+                                  x=as.factor(Multi3))) +
+    geom_bar(position = "stack", stat="identity") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90), axis.title.x = element_blank()) + 
+    labs(y = "relative peak area", fill ="InDel size") +
+    scale_fill_gradient2(low="blue", mid="grey", high="red", space ="Lab") +
+    theme(legend.position = "none")  +
+    facet_wrap(. ~well, ncol = 11, scales="fixed") 
+    
+    
+    
+    #plotting on multiple pages
+for (i in seq(1, length(unique(peakScanner_DF_F$well)), 24))
+{
+   #if(i <)
+   #dev_size <- dev.size(units = "px")
+   #dev.new(width = 525, height =330, unit ="px", noRStudioGD = TRUE) 
+  print(
+    ggplot(peakScanner_DF_F[peakScanner_DF_F$well %in% levels(as.factor(peakScanner_DF_F$well))[i:(i+23)], ], aes(fill=Size.InDels, 
+                                  y=Area.in.BP.RelToSum,
+                                  x=as.factor(Multi3))) +
+    geom_bar(position = "stack", stat="identity") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90), axis.title.x = element_blank()) + 
+    labs(y = "relative peak area", fill ="InDel size") +
+    theme(legend.position = "bottom")  +
+    scale_fill_gradient2(low="blue", mid="grey", high="red", space ="Lab") +
+    facet_wrap(facets = ~well, nrow = 3, ncol = 12, scales="fixed")
+   )
+
+}
+
+```
+
+## END
+```{r, knitting_a_report, echo = FALSE, eval = !isTRUE(getOption('knitr.in.progress'))}
+if(KNITreport)
+{
+ #this chunk should only be executed IF knitr is not currently executed to void an infinite loop of calling knitr from each document that is knitted; The next line of code is just used to get a confirmation that knitr isn´t really running.
+  print(paste("Is knitr.in.progress?",as.character(isFALSE(getOption('knitr.in.progress')))))
+
+#saving the currently open Rstudio file - needs to be saved bevore knitting to make sure the correct contetn is knitted.
+rstudioapi::documentSave(rstudioapi::getActiveDocumentContext()$id)
+
+#obtaining the file name of the currently active document  
+RMD_fileName <- str_replace(rstudioapi::getActiveDocumentContext()$path, paste0(sub("\\/[^\\/]*$", "",rstudioapi::getActiveDocumentContext()$path),"/"),"")
+
+
+#setting up the file name and output directory to save the knitted file
+ outputFileName <- paste0(str_replace(fileName,".txt",""), "_FLA_OVERVIEW_T2_fam")
+ outputPath <- paste0(getwd(),str_replace(dir_output,".",""))
+
+#if there is an RMD_fileName knit it
+  if(RMD_fileName!=""){
+      rmarkdown::render(input = RMD_fileName, output_file = outputFileName, output_dir = outputPath)
+    print(paste("Summary file:",outputFileName," is at",outputPath))
+  }
+ 
+#a function to display HTML content in the Rstudio viewer
+viewerpane.html <- function(xfile, vsize=NULL){
+  # Function: viewerpane.html version 1.00 23July2018
+  # Purpose: view RMarkdown Knit-generated html file in RStudio Viewer pane
+  # Status: Dev/Test
+  # Args:
+  # xfile = quoted name of html file (and path if not located in current directory)
+  # vsize = viewer arg height, default=NULL; alt values: "maximize", or numeric {3 to 8}
+  # Example: x <- "RMD-Demo-Viridis-002x.html"
+  # References:
+  # 1. https://rstudio.github.io/rstudio-extensions/rstudio_viewer.html
+  # 2. https://rstudio.github.io/rstudio-extensions/pkgdown/rstudioapi/reference/viewer.html
+  # 3. https://rstudio.github.io/rstudio-extensions/rstudioapi.html
+  #
+  # library(rstudioapi)
+  xfile.b <- basename(xfile)
+  tempDir <- tempfile()
+  dir.create(tempDir)
+  htmlFile <- file.path(tempDir, xfile.b)
+  # (code to write some content to the file) -- see next line
+  file.copy(xfile, htmlFile)
+  viewer <- getOption("viewer")
+  viewer(htmlFile, height  = vsize)
+}
+
+#calling the function to display the HTML document
+viewerpane.html(xfile = paste0(outputPath,outputFileName,"_T2_fam",".html"))
+}
+```
