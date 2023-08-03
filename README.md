@@ -3,6 +3,7 @@ READ ME
 
 PeakScanner_peakFilter_v3_5_1
 Version 3_5_1
+Authors: Christoph Metzendorf and Eugenia Mazzaferro
 
 Objective
 To determine the fragment sizes, peak heights and relative wild type-peak area of potentially CRISPR/Cas9-edited samples of interest (unknown genotype), based on peaks observed in wild type control samples obtained using PCR products run through capillary electrophoresis on an Applied Biosystems® 3730XL DNA analyzer (Applied Biosystems, Waltham, USA) and data processed by Peak Scanner version 2.0 (ThermoFisher, Waltham, USA).
@@ -88,11 +89,18 @@ Instructions how to run software on your own data:
 -Run all 
 Note: Multiple plates of the same experiment can be analyzed simultaneously and will be compiled in the same output file. 
 
+--
+
 The .docx version of this readme file additionally contains the following figures.
+
 Fig 1. Example of the PeakScanner exported file (input file for the script). It contains information on all wells and all peaks detected on each of the 4 fluorophores available.
+
 Fig 2. Example of the PLATE_LAYOUT file
+
 Fig 3 Example of the OVERVIEW file
+
 Fig 4 Example of the RESULTS file
+
 Fig 5. Example of visual representation of the presence/absence of wt peaks in each well in a 96-well plate. Yellow indicates the relative wt-peak area per well is closer to 1. Purple shows the relative wt-peak area is closer to 0 (no wt-peak). Grey denotes samples that were excluded from the analysis due to low quality of PCR product or as indicated in the layout. 
 
 ![image](https://github.com/denHoed-Lab/FLA-script/assets/141336566/1f86ee65-d4b7-4711-a6a1-5dc652f1aff1)
